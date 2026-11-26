@@ -4,6 +4,8 @@
 
 ## 0.1.1 - 2026-11-26
 
+- **Documentation:** badges in the README (crates.io, docs.rs, CI, downloads, license, MSRV, chrony versions).
+
 ## 0.1.0 - 2026-11-26
 
 First release.
