@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.0 - 2026-11-26
+
 First release.
 
 - **Protocol:** chronyd's command and monitoring protocol, version 6, as chrony 4.0 to 4.9 speak it. Every request (60) and every kind of reply, encoded and decoded without I/O, the earlier forms of `add`, `local`, `doffset`, `serverstats` and `ntpdata` included.
