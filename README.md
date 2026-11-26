@@ -1,5 +1,13 @@
 # chrony-cmdmon
 
+[![crates.io](https://img.shields.io/crates/v/chrony-cmdmon.svg)](https://crates.io/crates/chrony-cmdmon)
+[![docs.rs](https://img.shields.io/docsrs/chrony-cmdmon)](https://docs.rs/chrony-cmdmon)
+[![CI](https://github.com/sntns/chrony-cmdmon/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sntns/chrony-cmdmon/actions/workflows/ci.yml)
+[![Downloads](https://img.shields.io/crates/d/chrony-cmdmon.svg)](https://crates.io/crates/chrony-cmdmon)
+[![License](https://img.shields.io/crates/l/chrony-cmdmon.svg)](#license)
+[![MSRV](https://img.shields.io/crates/msrv/chrony-cmdmon.svg)](#minimum-rust-version)
+[![chrony](https://img.shields.io/badge/chrony-4.0%E2%80%934.9-blue.svg)](#chrony-versions)
+
 An async Rust client for [chrony](https://chrony-project.org)'s command and
 monitoring protocol: what `chronyc` speaks to `chronyd`, over chronyd's Unix
 socket. It comes with `cmdmon`, a command line tool equivalent to `chronyc`.
