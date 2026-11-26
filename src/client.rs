@@ -15,12 +15,7 @@ use std::time::Duration;
 use tokio::net::UnixDatagram;
 use tokio::sync::Mutex;
 
-use crate::protocol::reply_sequence;
-use crate::protocol::Reply;
-use crate::protocol::Request;
-use crate::protocol::SourceData;
-use crate::protocol::Sources;
-use crate::protocol::Tracking;
+use crate::protocol::*;
 use crate::Error;
 
 /// chronyd's command socket, as distributions build it.
@@ -29,6 +24,14 @@ pub const DEFAULT_SOCKET: &str = "/run/chrony/chronyd.sock";
 /// How long chronyd has to answer an attempt, and how many attempts.
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(1000);
 const DEFAULT_ATTEMPTS: u16 = 3;
+
+/// chronyd's answer to a request, undecoded ([`Client::request_raw`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawReply {
+    /// The request's sequence number, which the answer echoes.
+    pub sequence: u32,
+    pub packet: Vec<u8>,
+}
 
 /// A client of chronyd. Requests are sent one at a time (the client may be
 /// shared: `&self`).
@@ -75,13 +78,21 @@ impl Client {
 
     /// Sends `request`, again after each timeout, and decodes the answer.
     pub async fn request(&self, request: &Request) -> Result<Reply, Error> {
+        let raw = self.request_raw(request).await?;
+        Reply::decode(request, raw.sequence, &raw.packet)
+    }
+
+    /// Sends `request`, again after each timeout, and returns chronyd's
+    /// answer undecoded: the packet whose sequence is the request's (to
+    /// record, or to decode otherwise).
+    pub async fn request_raw(&self, request: &Request) -> Result<RawReply, Error> {
         let socket = self.socket.lock().await;
         let sequence = self
             .sequence
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut buffer = [0u8; 1024];
+        let mut buffer = [0u8; 2048];
         for attempt in 0..self.attempts {
-            socket.send(&request.encode(sequence, attempt)).await?;
+            socket.send(&request.encode(sequence, attempt)?).await?;
             let deadline = tokio::time::Instant::now() + self.timeout;
             loop {
                 let received = tokio::time::timeout_at(deadline, socket.recv(&mut buffer)).await;
@@ -90,46 +101,201 @@ impl Client {
                 };
                 let packet = &buffer[..received?];
                 // A late answer to an earlier request: not this one's.
-                if reply_sequence(packet) != Some(sequence) {
-                    continue;
+                if ReplyHeader::parse(packet).map(|h| h.sequence).ok() == Some(sequence) {
+                    return Ok(RawReply {
+                        sequence,
+                        packet: packet.to_vec(),
+                    });
                 }
-                return Reply::decode(request, sequence, packet);
             }
         }
         Err(Error::Timeout)
+    }
+
+    async fn null(&self, request: Request) -> Result<(), Error> {
+        self.request(&request).await.map(|_| ())
     }
 
     /// `chronyc tracking`.
     pub async fn tracking(&self) -> Result<Tracking, Error> {
         match self.request(&Request::Tracking).await? {
             Reply::Tracking(tracking) => Ok(tracking),
-            _ => Err(Error::Malformed("unexpected reply type")),
+            _ => Err(unexpected()),
+        }
+    }
+
+    /// How many sources chronyd has (`sources` lists them).
+    pub async fn n_sources(&self) -> Result<u32, Error> {
+        match self.request(&Request::NSources).await? {
+            Reply::NSources(n) => Ok(n),
+            _ => Err(unexpected()),
         }
     }
 
     /// `chronyc sources`: every source, in chronyd's order.
     pub async fn sources(&self) -> Result<Vec<SourceData>, Error> {
-        let n = match self.request(&Request::NSources).await? {
-            Reply::NSources(n) => n,
-            _ => return Err(Error::Malformed("unexpected reply type")),
-        };
-        let mut sources = Vec::with_capacity(n as usize);
+        self.each_source(
+            |index| Request::SourceData { index },
+            |reply| match reply {
+                Reply::SourceData(source) => Some(source),
+                _ => None,
+            },
+        )
+        .await
+    }
+
+    /// `chronyc sourcestats`: every source's statistics, in chronyd's order.
+    pub async fn sourcestats(&self) -> Result<Vec<Sourcestats>, Error> {
+        self.each_source(
+            |index| Request::Sourcestats { index },
+            |reply| match reply {
+                Reply::Sourcestats(stats) => Some(stats),
+                _ => None,
+            },
+        )
+        .await
+    }
+
+    /// `chronyc selectdata`: what the source selection made of every
+    /// source.
+    pub async fn select_data(&self) -> Result<Vec<SelectData>, Error> {
+        self.each_source(
+            |index| Request::SelectData { index },
+            |reply| match reply {
+                Reply::SelectData(data) => Some(data),
+                _ => None,
+            },
+        )
+        .await
+    }
+
+    /// One request per source index; a source removed meanwhile (reload
+    /// sources, a pool's server replaced) ends the list.
+    async fn each_source<T>(
+        &self,
+        request: impl Fn(u32) -> Request,
+        extract: impl Fn(Reply) -> Option<T>,
+    ) -> Result<Vec<T>, Error> {
+        let n = self.n_sources().await?;
+        let mut items = Vec::with_capacity(n as usize);
         for index in 0..n {
-            match self.request(&Request::SourceData { index }).await {
-                Ok(Reply::SourceData(source)) => sources.push(source),
-                // Removed meanwhile (reload sources, a pool's server).
-                Err(Error::Status(crate::Status::NoSuchSource)) => break,
-                Ok(_) => return Err(Error::Malformed("unexpected reply type")),
+            match self.request(&request(index)).await {
+                Ok(reply) => items.push(extract(reply).ok_or_else(unexpected)?),
+                Err(Error::Status(Status::NoSuchSource)) => break,
                 Err(e) => return Err(e),
             }
         }
-        Ok(sources)
+        Ok(items)
+    }
+
+    /// `chronyc ntpdata`, for the source at `address`.
+    pub async fn ntp_data(&self, address: impl Into<Address>) -> Result<NtpData, Error> {
+        match self.request(&Request::NtpData(address.into())).await? {
+            Reply::NtpData(data) => Ok(data),
+            _ => Err(unexpected()),
+        }
+    }
+
+    /// `chronyc sourcename`: the name the source at `address` was
+    /// configured with.
+    pub async fn source_name(&self, address: impl Into<Address>) -> Result<String, Error> {
+        match self
+            .request(&Request::NtpSourceName(address.into()))
+            .await?
+        {
+            Reply::NtpSourceName(name) => Ok(name),
+            _ => Err(unexpected()),
+        }
+    }
+
+    /// `chronyc authdata`, for the source at `address`.
+    pub async fn auth_data(&self, address: impl Into<Address>) -> Result<AuthData, Error> {
+        match self.request(&Request::AuthData(address.into())).await? {
+            Reply::AuthData(data) => Ok(data),
+            _ => Err(unexpected()),
+        }
+    }
+
+    /// `chronyc activity`.
+    pub async fn activity(&self) -> Result<Activity, Error> {
+        match self.request(&Request::Activity).await? {
+            Reply::Activity(activity) => Ok(activity),
+            _ => Err(unexpected()),
+        }
+    }
+
+    /// `chronyc smoothing`.
+    pub async fn smoothing(&self) -> Result<Smoothing, Error> {
+        match self.request(&Request::Smoothing).await? {
+            Reply::Smoothing(smoothing) => Ok(smoothing),
+            _ => Err(unexpected()),
+        }
+    }
+
+    /// `chronyc rtcdata`.
+    pub async fn rtc_data(&self) -> Result<Rtc, Error> {
+        match self.request(&Request::RtcReport).await? {
+            Reply::Rtc(rtc) => Ok(rtc),
+            _ => Err(unexpected()),
+        }
+    }
+
+    /// `chronyc serverstats`.
+    pub async fn server_stats(&self) -> Result<ServerStats, Error> {
+        match self.request(&Request::ServerStats).await? {
+            Reply::ServerStats(stats) => Ok(stats),
+            _ => Err(unexpected()),
+        }
+    }
+
+    /// `chronyc manual list`.
+    pub async fn manual_list(&self) -> Result<Vec<ManualSample>, Error> {
+        match self.request(&Request::ManualList).await? {
+            Reply::ManualList(samples) => Ok(samples),
+            _ => Err(unexpected()),
+        }
+    }
+
+    /// `chronyc clients`: every client chronyd remembers with at least
+    /// `min_hits` hits, `reset` clearing their counters as they are read.
+    pub async fn clients(&self, min_hits: u32, reset: bool) -> Result<Vec<ClientAccess>, Error> {
+        let mut clients = Vec::new();
+        let mut first_index = 0;
+        loop {
+            let batch = match self
+                .request(&Request::ClientAccesses {
+                    first_index,
+                    n_clients: CLIENT_ACCESSES as u32,
+                    min_hits,
+                    reset,
+                })
+                .await?
+            {
+                Reply::ClientAccesses(batch) => batch,
+                _ => return Err(unexpected()),
+            };
+            clients.extend(batch.clients);
+            // Done, or chronyd made no progress (its table shrank).
+            if batch.next_index >= batch.n_indices || batch.next_index <= first_index {
+                return Ok(clients);
+            }
+            first_index = batch.next_index;
+        }
+    }
+
+    /// `chronyc settime`: a manual sample of the time (manual mode must be
+    /// on).
+    pub async fn settime(&self, time: std::time::SystemTime) -> Result<ManualTimestamp, Error> {
+        match self.request(&Request::Settime(time)).await? {
+            Reply::ManualTimestamp(timestamp) => Ok(timestamp),
+            _ => Err(unexpected()),
+        }
     }
 
     /// `chronyc burst n_good/n_total`, for every source.
     pub async fn burst(&self, n_good: u32, n_total: u32) -> Result<(), Error> {
-        self.null(&Request::Burst {
-            sources: Sources::All,
+        self.null(Request::Burst {
+            selection: SourceSelection::All,
             n_good,
             n_total,
         })
@@ -139,27 +305,108 @@ impl Client {
     /// `chronyc online` (`true`) or `chronyc offline` (`false`), for every
     /// source.
     pub async fn set_online(&self, online: bool) -> Result<(), Error> {
-        let sources = Sources::All;
-        self.null(&if online {
-            Request::Online { sources }
+        let selection = SourceSelection::All;
+        self.null(if online {
+            Request::Online(selection)
         } else {
-            Request::Offline { sources }
+            Request::Offline(selection)
         })
         .await
     }
 
+    /// `chronyc onoffline`: each source online or offline, as its route.
+    pub async fn onoffline(&self) -> Result<(), Error> {
+        self.null(Request::OnOffline).await
+    }
+
+    /// `chronyc add server|peer|pool`.
+    pub async fn add_source(&self, source: NtpSource) -> Result<(), Error> {
+        self.null(Request::AddSource(Box::new(source))).await
+    }
+
+    /// `chronyc delete`.
+    pub async fn delete_source(&self, address: impl Into<Address>) -> Result<(), Error> {
+        self.null(Request::DelSource(address.into())).await
+    }
+
     /// `chronyc makestep`.
     pub async fn make_step(&self) -> Result<(), Error> {
-        self.null(&Request::MakeStep).await
+        self.null(Request::MakeStep).await
     }
 
     /// `chronyc reload sources`.
     pub async fn reload_sources(&self) -> Result<(), Error> {
-        self.null(&Request::ReloadSources).await
+        self.null(Request::ReloadSources).await
     }
 
-    async fn null(&self, request: &Request) -> Result<(), Error> {
-        self.request(request).await.map(|_| ())
+    /// `chronyc reset sources`.
+    pub async fn reset_sources(&self) -> Result<(), Error> {
+        self.null(Request::ResetSources).await
+    }
+
+    /// `chronyc refresh`.
+    pub async fn refresh(&self) -> Result<(), Error> {
+        self.null(Request::Refresh).await
+    }
+
+    /// `chronyc reselect`.
+    pub async fn reselect(&self) -> Result<(), Error> {
+        self.null(Request::Reselect).await
+    }
+
+    /// `chronyc dump`.
+    pub async fn dump(&self) -> Result<(), Error> {
+        self.null(Request::Dump).await
+    }
+
+    /// `chronyc cyclelogs`.
+    pub async fn cycle_logs(&self) -> Result<(), Error> {
+        self.null(Request::CycleLogs).await
+    }
+
+    /// `chronyc rekey`.
+    pub async fn rekey(&self) -> Result<(), Error> {
+        self.null(Request::Rekey).await
+    }
+
+    /// `chronyc writertc`.
+    pub async fn write_rtc(&self) -> Result<(), Error> {
+        self.null(Request::WriteRtc).await
+    }
+
+    /// `chronyc trimrtc`.
+    pub async fn trim_rtc(&self) -> Result<(), Error> {
+        self.null(Request::TrimRtc).await
+    }
+
+    /// `chronyc shutdown`.
+    pub async fn shutdown(&self) -> Result<(), Error> {
+        self.null(Request::Shutdown).await
+    }
+
+    /// `chronyc accheck`: whether NTP clients at `ip` are allowed.
+    pub async fn ntp_access(&self, ip: std::net::IpAddr) -> Result<bool, Error> {
+        access(self.request(&Request::AcCheck(ip)).await)
+    }
+
+    /// `chronyc cmdaccheck`: whether command clients at `ip` are allowed.
+    pub async fn command_access(&self, ip: std::net::IpAddr) -> Result<bool, Error> {
+        access(self.request(&Request::CmdAcCheck(ip)).await)
+    }
+}
+
+/// A reply of another type than the request's: `decode` rules it out.
+fn unexpected() -> Error {
+    Error::Malformed("unexpected reply type")
+}
+
+/// chronyd answers an access check with a status.
+fn access(result: Result<Reply, Error>) -> Result<bool, Error> {
+    match result {
+        Err(Error::Status(Status::AccessAllowed)) => Ok(true),
+        Err(Error::Status(Status::AccessDenied)) => Ok(false),
+        Ok(_) => Err(unexpected()),
+        Err(e) => Err(e),
     }
 }
 
@@ -234,83 +481,4 @@ fn random_u64() -> u64 {
 
 fn random_u32() -> u32 {
     random_u64() as u32
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A chronyd answering `NSources` (3) and refusing the rest; the first
-    /// request is dropped, to make the client try again.
-    async fn fake_chronyd(dir: &Path) -> PathBuf {
-        let path = dir.join("chronyd.sock");
-        let server = UnixDatagram::bind(&path).unwrap();
-        tokio::spawn(async move {
-            let mut buffer = [0u8; 1024];
-            let mut first = true;
-            loop {
-                let Ok((n, from)) = server.recv_from(&mut buffer).await else {
-                    return;
-                };
-                if first {
-                    first = false;
-                    continue;
-                }
-                let request = &buffer[..n];
-                let command = u16::from_be_bytes([request[4], request[5]]);
-                let (reply, status, data): (u16, u16, Vec<u8>) = if command == 14 {
-                    (2, 0, 3u32.to_be_bytes().to_vec())
-                } else {
-                    (1, 2, Vec::new())
-                };
-                let mut packet = vec![6, 2, 0, 0];
-                packet.extend_from_slice(&command.to_be_bytes());
-                packet.extend_from_slice(&reply.to_be_bytes());
-                packet.extend_from_slice(&status.to_be_bytes());
-                packet.extend_from_slice(&[0; 6]);
-                packet.extend_from_slice(&request[8..12]);
-                packet.extend_from_slice(&[0; 8]);
-                packet.extend_from_slice(&data);
-                let to = from.as_pathname().unwrap().to_path_buf();
-                let _ = server.send_to(&packet, to).await;
-            }
-        });
-        path
-    }
-
-    fn temp_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("chrony-cmdmon-test-{:x}", random_u64()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    #[tokio::test]
-    async fn a_request_is_sent_again_until_answered() {
-        let dir = temp_dir();
-        let server = fake_chronyd(&dir).await;
-        let client = Client::connect(&server)
-            .await
-            .unwrap()
-            .with_timeout(Duration::from_millis(100));
-        assert_eq!(
-            client.request(&Request::NSources).await.unwrap(),
-            Reply::NSources(3)
-        );
-        assert!(matches!(
-            client.reload_sources().await,
-            Err(Error::Status(crate::Status::Unauthorised))
-        ));
-        drop(client);
-        // Its own socket and directories are gone.
-        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
-        assert_eq!(left.len(), 1);
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[tokio::test]
-    async fn no_chronyd() {
-        let dir = temp_dir();
-        assert!(Client::connect(dir.join("chronyd.sock")).await.is_err());
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
 }

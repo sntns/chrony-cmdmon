@@ -14,8 +14,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "sources" => {
             for s in chronyd.sources().await? {
                 println!(
-                    "{:?} {} {:<40} {:>2} {:>3} {:>3o} {:>5} {:+.9} [{:+.9}] +/- {:.9}",
-                    s.mode,
+                    "{}{} {:<40} {:>2} {:>3} {:>3o} {:>5} {:+.9} [{:+.9}] +/- {:.9}",
+                    s.mode.symbol(),
                     s.state.symbol(),
                     s.address.to_string(),
                     s.stratum,

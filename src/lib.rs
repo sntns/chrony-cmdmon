@@ -14,10 +14,10 @@
 //! # }
 //! ```
 //!
-//! It speaks protocol version 6 (chrony 4.x) and covers `tracking`,
-//! `sources`, `burst`, `online` / `offline`, `makestep` and
-//! `reload sources`. [`protocol`] encodes the requests and decodes the
-//! replies without I/O, for other transports.
+//! It speaks protocol version 6 (chrony 4.x), every command chronyd 4.x
+//! accepts: [`Client`] has a method per `chronyc` command, and
+//! [`Client::request`] sends any [`Request`]. [`protocol`] encodes the
+//! requests and decodes the replies without I/O, for other transports.
 //!
 //! Privileged commands are only accepted over the Unix socket, which is
 //! usually reachable by root and chronyd's own user only.
@@ -26,14 +26,9 @@ mod client;
 pub mod protocol;
 
 pub use client::Client;
+pub use client::RawReply;
 pub use client::DEFAULT_SOCKET;
-pub use protocol::Address;
-pub use protocol::LeapStatus;
-pub use protocol::SourceData;
-pub use protocol::SourceMode;
-pub use protocol::SourceState;
-pub use protocol::Status;
-pub use protocol::Tracking;
+pub use protocol::*;
 
 /// What can go wrong talking to chronyd.
 #[derive(Debug)]
@@ -48,6 +43,8 @@ pub enum Error {
     Version(u8),
     /// An answer that can't be decoded.
     Malformed(&'static str),
+    /// A request that can't be encoded (a source name too long, ...).
+    InvalidRequest(&'static str),
 }
 
 impl std::fmt::Display for Error {
@@ -62,6 +59,7 @@ impl std::fmt::Display for Error {
                 protocol::PROTOCOL_VERSION
             ),
             Error::Malformed(what) => write!(f, "malformed answer from chronyd: {what}"),
+            Error::InvalidRequest(what) => write!(f, "invalid request: {what}"),
         }
     }
 }
@@ -78,5 +76,33 @@ impl std::error::Error for Error {
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         Error::Io(e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn errors_say_what_went_wrong() {
+        let io = Error::from(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert!(io.to_string().starts_with("chronyd socket: "));
+        assert!(std::error::Error::source(&io).is_some());
+        for (error, text) in [
+            (Error::Timeout, "chronyd did not answer"),
+            (
+                Error::Status(Status::NoSuchSource),
+                "chronyd: No such source",
+            ),
+            (
+                Error::Version(5),
+                "chronyd speaks protocol version 5, not 6",
+            ),
+            (Error::Malformed("x"), "malformed answer from chronyd: x"),
+            (Error::InvalidRequest("y"), "invalid request: y"),
+        ] {
+            assert_eq!(error.to_string(), text);
+            assert!(std::error::Error::source(&error).is_none());
+        }
     }
 }
