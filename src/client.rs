@@ -30,6 +30,7 @@ const DEFAULT_ATTEMPTS: u16 = 3;
 pub struct RawReply {
     /// The request's sequence number, which the answer echoes.
     pub sequence: u32,
+    /// The reply packet as received, header included.
     pub packet: Vec<u8>,
 }
 
@@ -40,6 +41,8 @@ pub struct Client {
     sequence: std::sync::atomic::AtomicU32,
     timeout: Duration,
     attempts: u16,
+    /// The commands this chronyd only knows in their older form.
+    legacy: std::sync::Mutex<std::collections::HashSet<u16>>,
     _dir: SocketDir,
 }
 
@@ -58,6 +61,7 @@ impl Client {
         Ok(Client {
             socket: Mutex::new(socket),
             sequence: std::sync::atomic::AtomicU32::new(random_u32()),
+            legacy: std::sync::Mutex::new(std::collections::HashSet::new()),
             timeout: DEFAULT_TIMEOUT,
             attempts: DEFAULT_ATTEMPTS,
             _dir: dir,
@@ -77,22 +81,60 @@ impl Client {
     }
 
     /// Sends `request`, again after each timeout, and decodes the answer.
+    ///
+    /// A request with an older form ([`Request::legacy_code`]) that chronyd
+    /// refuses as invalid (a version before the current form) is sent again
+    /// in that form, and from then on in that form only.
     pub async fn request(&self, request: &Request) -> Result<Reply, Error> {
-        let raw = self.request_raw(request).await?;
-        Reply::decode(request, raw.sequence, &raw.packet)
+        let legacy = self.uses_legacy(request);
+        let raw = self.exchange(request, legacy).await?;
+        match Reply::decode(request, raw.sequence, &raw.packet) {
+            Err(Error::Status(Status::Invalid)) if !legacy && request.legacy_code().is_some() => {
+                let raw = self.exchange(request, true).await?;
+                let reply = Reply::decode(request, raw.sequence, &raw.packet);
+                if reply.is_ok() {
+                    self.legacy
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(request.code());
+                }
+                reply
+            }
+            reply => reply,
+        }
     }
 
     /// Sends `request`, again after each timeout, and returns chronyd's
     /// answer undecoded: the packet whose sequence is the request's (to
-    /// record, or to decode otherwise).
+    /// record, or to decode otherwise). In its older form if chronyd was
+    /// found to need it.
     pub async fn request_raw(&self, request: &Request) -> Result<RawReply, Error> {
+        self.exchange(request, self.uses_legacy(request)).await
+    }
+
+    fn uses_legacy(&self, request: &Request) -> bool {
+        request.legacy_code().is_some()
+            && self
+                .legacy
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&request.code())
+    }
+
+    async fn exchange(&self, request: &Request, legacy: bool) -> Result<RawReply, Error> {
         let socket = self.socket.lock().await;
         let sequence = self
             .sequence
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut buffer = [0u8; 2048];
         for attempt in 0..self.attempts {
-            socket.send(&request.encode(sequence, attempt)?).await?;
+            let packet = match legacy {
+                true => request
+                    .encode_legacy(sequence, attempt)
+                    .unwrap_or_else(|| request.encode(sequence, attempt))?,
+                false => request.encode(sequence, attempt)?,
+            };
+            socket.send(&packet).await?;
             let deadline = tokio::time::Instant::now() + self.timeout;
             loop {
                 let received = tokio::time::timeout_at(deadline, socket.recv(&mut buffer)).await;

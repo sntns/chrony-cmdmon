@@ -388,7 +388,7 @@ async fn every_method_sends_its_command() {
     assert_eq!(
         *codes.lock().unwrap(),
         [
-            33, 14, 15, 14, 34, 14, 69, 57, 65, 67, 44, 51, 35, 54, 41, 68, 11, 3, 1, 2, 63, 64,
+            33, 14, 15, 14, 34, 14, 69, 57, 65, 67, 44, 51, 35, 54, 41, 68, 11, 3, 1, 2, 63, 75,
             29, 43, 70, 66, 53, 48, 6, 37, 16, 30, 36, 62
         ]
     );
@@ -402,4 +402,50 @@ async fn a_reply_of_another_kind_is_malformed() {
     });
     let client = chronyd.client().await;
     assert!(matches!(client.tracking().await, Err(Error::Malformed(_))));
+}
+
+#[tokio::test]
+async fn a_chronyd_that_only_knows_the_older_form_gets_it() {
+    // chronyd 4.0 to 4.8: no ADD_SOURCE2 (75), ADD_SOURCE (64) instead.
+    let codes = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = codes.clone();
+    let chronyd = FakeChronyd::start(move |request, _| {
+        let code = command(request);
+        seen.lock().unwrap().push(code);
+        let status = if code == 75 {
+            Status::Invalid
+        } else {
+            Status::Success
+        };
+        vec![reply(request, ReplyKind::Null, status, &[])]
+    });
+    let client = chronyd.client().await;
+    client
+        .add_source(NtpSource::server("192.0.2.1"))
+        .await
+        .unwrap();
+    client
+        .add_source(NtpSource::server("192.0.2.2"))
+        .await
+        .unwrap();
+    // The current form once, then the older form only.
+    assert_eq!(*codes.lock().unwrap(), [75, 64, 64]);
+}
+
+#[tokio::test]
+async fn a_command_invalid_in_every_form_is_refused() {
+    let chronyd = FakeChronyd::start(|request, _| {
+        vec![reply(request, ReplyKind::Null, Status::Invalid, &[])]
+    });
+    let client = chronyd.client().await;
+    assert!(matches!(
+        client.request(&Request::Doffset(0.1)).await,
+        Err(Error::Status(Status::Invalid))
+    ));
+    // No older form: refused at once.
+    assert!(matches!(
+        client.reload_sources().await,
+        Err(Error::Status(Status::Invalid))
+    ));
+    assert_eq!(chronyd.received(), 3);
 }

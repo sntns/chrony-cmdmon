@@ -10,6 +10,19 @@ keywords = ["chrony", "ntp", "time", "chronyc"]
 categories = ["network-programming", "date-and-time", "api-bindings"]
 readme = "README.md"
 
+[features]
+# The `cmdmon` command line tool, chronyc's equivalent:
+# `cargo install chrony-cmdmon --features cli`.
+cli = ["tokio/rt", "tokio/macros"]
+
+[[bin]]
+name = "cmdmon"
+required-features = ["cli"]
+
+[[test]]
+name = "cli"
+required-features = ["cli"]
+
 [dependencies]
 libc = "0.2"
 tokio = { version = "1", features = ["net", "time", "sync"] }
@@ -17,3 +30,7 @@ tokio = { version = "1", features = ["net", "time", "sync"] }
 [dev-dependencies]
 tokio = { version = "1", features = ["net", "time", "sync", "macros", "rt"] }
 proptest = "1"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

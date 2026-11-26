@@ -20,27 +20,47 @@ pub const PROTOCOL_VERSION: u8 = 6;
 /// Whether chronyd carried out a command (`STT_*`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Status {
+    /// The command was carried out (`STT_SUCCESS`).
     Success,
+    /// The command failed (`STT_FAILED`).
     Failed,
     /// A privileged command over UDP.
     Unauthorised,
+    /// Unknown command, or not supported by this chronyd (`STT_INVALID`).
     Invalid,
+    /// No source with that address (`STT_NOSUCHSOURCE`).
     NoSuchSource,
+    /// Stale or duplicate timestamp (`STT_INVALIDTS`).
     InvalidTimestamp,
+    /// The facility is not enabled in chronyd (`STT_NOTENABLED`).
     NotEnabled,
+    /// Invalid subnet (`STT_BADSUBNET`).
     BadSubnet,
+    /// `accheck`/`cmdaccheck`: access allowed (`STT_ACCESSALLOWED`).
     AccessAllowed,
+    /// `accheck`/`cmdaccheck`: access denied (`STT_ACCESSDENIED`).
     AccessDenied,
+    /// The source is already known (`STT_SOURCEALREADYKNOWN`).
     SourceAlreadyKnown,
+    /// No room for another source (`STT_TOOMANYSOURCES`).
     TooManySources,
+    /// The RTC driver is not running (`STT_NORTC`).
     NoRtc,
+    /// The RTC parameters could not be written (`STT_BADRTCFILE`).
     BadRtcFile,
+    /// The facility is not active (`STT_INACTIVE`).
     Inactive,
+    /// Manual sample index out of range (`STT_BADSAMPLE`).
     BadSample,
+    /// Address family not supported (`STT_INVALIDAF`).
     InvalidAddressFamily,
+    /// Protocol version mismatch (`STT_BADPKTVERSION`).
     BadPacketVersion,
+    /// Bad packet length (`STT_BADPKTLENGTH`).
     BadPacketLength,
+    /// Invalid source name (`STT_INVALIDNAME`).
     InvalidName,
+    /// A status this crate does not know.
     Other(u16),
 }
 
@@ -135,8 +155,11 @@ impl std::fmt::Display for Status {
 /// a source without one (a reference clock, a source not resolved yet).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Address {
+    /// No address.
     Unspecified,
+    /// An IPv4 or IPv6 address.
     Ip(IpAddr),
+    /// A reference ID (a source without an address).
     Id(u32),
 }
 

@@ -5,6 +5,10 @@
 
 use chrony_cmdmon::*;
 
+/// The tests share the chronyd: one at a time (one adds and deletes a
+/// source while the other counts them).
+static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn chronyd() -> Option<Client> {
     let socket = std::env::var("CHRONY_CMDMON_SOCKET").ok()?;
     Some(Client::connect(socket).await.expect("connect to chronyd"))
@@ -12,6 +16,7 @@ async fn chronyd() -> Option<Client> {
 
 #[tokio::test]
 async fn every_report() {
+    let _one = ONE_AT_A_TIME.lock().await;
     let Some(chronyd) = chronyd().await else {
         eprintln!("CHRONY_CMDMON_SOCKET not set: skipped");
         return;
@@ -74,9 +79,22 @@ async fn harmless_privileged_commands() {
         eprintln!("CHRONY_CMDMON_PRIVILEGED not set: skipped");
         return;
     }
+    let _one = ONE_AT_A_TIME.lock().await;
     let Some(chronyd) = chronyd().await else {
         return;
     };
     chronyd.burst(1, 2).await.unwrap();
     chronyd.reload_sources().await.unwrap();
+    // Added offline (no polls), then deleted: the current form of the
+    // request or the older one, whichever this chronyd knows.
+    let address: std::net::IpAddr = "192.0.2.123".parse().unwrap();
+    chronyd
+        .add_source(NtpSource {
+            flags: SourceFlags::default(),
+            ..NtpSource::server(address.to_string())
+        })
+        .await
+        .unwrap();
+    assert_eq!(chronyd.source_name(address).await.unwrap(), "192.0.2.123");
+    chronyd.delete_source(address).await.unwrap();
 }

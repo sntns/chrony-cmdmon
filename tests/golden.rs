@@ -217,12 +217,17 @@ fn activity_and_server_stats() {
         panic!("serverstats");
     };
     let c = &f.lines("serverstats")[0];
+    // chronyc prints them in this order.
     assert_eq!(s.ntp_hits.to_string(), c[0]);
-    assert_eq!(s.nke_hits.to_string(), c[1]);
+    assert_eq!(s.ntp_drops.to_string(), c[1]);
     // chronyc's own commands since count too.
     let cmd_hits: u64 = c[2].parse().unwrap();
     assert!(s.cmd_hits <= cmd_hits && s.cmd_hits + 100 > cmd_hits);
-    assert_eq!(s.ntp_drops.to_string(), c[3]);
+    assert_eq!(s.cmd_drops.to_string(), c[3]);
+    assert_eq!(s.log_drops.to_string(), c[4]);
+    assert_eq!(s.nke_hits.to_string(), c[5]);
+    assert_eq!(s.nke_drops.to_string(), c[6]);
+    assert_eq!(s.ntp_auth_hits.to_string(), c[7]);
 }
 
 #[test]

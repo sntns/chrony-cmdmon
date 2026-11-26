@@ -1,0 +1,28 @@
+name: Upstream chrony
+
+# Every week: test the chrony releases newer than the newest in
+# ci/chrony-versions.txt. One that passes gets a pull request adding it to
+# the CI matrix, one that fails an issue (see ci/upstream.sh).
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Test new chrony releases
+        run: ci/upstream.sh
+        env:
+          GH_TOKEN: ${{ github.token }}

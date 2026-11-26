@@ -22,14 +22,21 @@ pub enum SourceSelection {
     All,
     /// The sources whose address matches `address` under `mask`
     /// (`chronyc burst 4/4 192.168.1.0/24`).
-    Matching { address: IpAddr, mask: IpAddr },
+    Matching {
+        /// The address to match.
+        address: IpAddr,
+        /// The mask applied to both addresses.
+        mask: IpAddr,
+    },
 }
 
 /// A subnet for the access commands (`allow`, `deny`, ...): `ip` `None`
 /// with 0 bits is every address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Subnet {
+    /// The network address; `None` for any family.
     pub ip: Option<IpAddr>,
+    /// The prefix length.
     pub bits: u8,
 }
 
@@ -45,33 +52,66 @@ impl Subnet {
 }
 
 /// Source selection options, and the flags of a source added
-/// ([`NtpSource::flags`]): a bit set.
+/// ([`NtpSource::flags`]): a bit set. The values are those of `ADD_SOURCE`
+/// (chronyd 4.0 to 4.8), translated for `ADD_SOURCE2` (4.9 and later),
+/// which renumbered some.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct SourceFlags(pub u32);
 
 impl SourceFlags {
+    /// Online (not `offline`).
     pub const ONLINE: SourceFlags = SourceFlags(0x1);
+    /// `auto_offline`.
     pub const AUTO_OFFLINE: SourceFlags = SourceFlags(0x2);
+    /// `iburst`.
     pub const IBURST: SourceFlags = SourceFlags(0x4);
+    /// `prefer`.
     pub const PREFER: SourceFlags = SourceFlags(0x8);
+    /// `noselect`.
     pub const NOSELECT: SourceFlags = SourceFlags(0x10);
+    /// `trust`.
     pub const TRUST: SourceFlags = SourceFlags(0x20);
+    /// `require`.
     pub const REQUIRE: SourceFlags = SourceFlags(0x40);
+    /// `xleave`.
     pub const INTERLEAVED: SourceFlags = SourceFlags(0x80);
+    /// `burst`.
     pub const BURST: SourceFlags = SourceFlags(0x100);
+    /// `nts`.
     pub const NTS: SourceFlags = SourceFlags(0x200);
+    /// `copy`.
     pub const COPY: SourceFlags = SourceFlags(0x400);
     /// The experimental monotonic root extension field.
     pub const EF_EXP_MONO_ROOT: SourceFlags = SourceFlags(0x800);
-    /// The experimental network correction extension field.
-    pub const EF_EXP_NET_CORRECTION: SourceFlags = SourceFlags(0x1000);
+    /// The network correction extension field (experimental before chronyd
+    /// 4.9).
+    pub const EF_NET_CORRECTION: SourceFlags = SourceFlags(0x1000);
     /// IPv4 addresses only (a name resolving to both).
     pub const IPV4: SourceFlags = SourceFlags(0x2000);
     /// IPv6 addresses only.
     pub const IPV6: SourceFlags = SourceFlags(0x4000);
 
+    /// Whether every flag of `other` is set.
     pub fn contains(self, other: SourceFlags) -> bool {
         self.0 & other.0 == other.0
+    }
+
+    /// As `ADD_SOURCE2` numbers them: IPv4 and IPv6 moved down, the
+    /// extension fields up.
+    fn for_add_source2(self) -> u32 {
+        let moved = [
+            (SourceFlags::IPV4, 0x800),
+            (SourceFlags::IPV6, 0x1000),
+            (SourceFlags::EF_NET_CORRECTION, 0x1_0000),
+            (SourceFlags::EF_EXP_MONO_ROOT, 0x8000_0000),
+        ];
+        let mut flags = self.0 & 0x7ff;
+        for (flag, value) in moved {
+            if self.contains(flag) {
+                flags |= value;
+            }
+        }
+        flags
     }
 }
 
@@ -91,8 +131,11 @@ impl std::ops::BitOrAssign for SourceFlags {
 /// What a source added is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceKind {
+    /// `server`.
     Server,
+    /// `peer`.
     Peer,
+    /// `pool`.
     Pool,
 }
 
@@ -100,14 +143,21 @@ pub enum SourceKind {
 /// chronyd's defaults, online, with no name.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NtpSource {
+    /// Server, peer or pool.
     pub kind: SourceKind,
     /// A host name or an address: at most 255 bytes, no NUL.
     pub name: String,
+    /// NTP port.
     pub port: u32,
+    /// `minpoll` (power of 2 seconds).
     pub minpoll: i32,
+    /// `maxpoll` (power of 2 seconds).
     pub maxpoll: i32,
+    /// `presend` (power of 2 seconds).
     pub presend_minpoll: i32,
+    /// `minstratum`.
     pub min_stratum: u32,
+    /// `polltarget`.
     pub poll_target: u32,
     /// NTP version, 0 for chronyd's choice.
     pub version: u32,
@@ -119,19 +169,33 @@ pub struct NtpSource {
     pub max_samples: i32,
     /// 0 for none.
     pub authkey: u32,
+    /// `ntsport`.
     pub nts_port: u32,
+    /// `maxdelay` (seconds).
     pub max_delay: f64,
+    /// `maxdelayratio`.
     pub max_delay_ratio: f64,
+    /// `maxdelaydevratio`.
     pub max_delay_dev_ratio: f64,
+    /// `mindelay` (seconds).
     pub min_delay: f64,
+    /// `asymmetry`.
     pub asymmetry: f64,
+    /// `offset` (seconds).
     pub offset: f64,
+    /// The boolean options.
     pub flags: SourceFlags,
     /// 0 for no filter.
     pub filter_length: i32,
+    /// `certset`.
     pub cert_set: u32,
+    /// `maxdelayquant`.
     pub max_delay_quant: f64,
+    /// `maxunreach` (chronyd 4.8 and later).
     pub max_unreach: i32,
+    /// How many NTS-KE attempts before the source is replaced (chronyd 4.9
+    /// and later; ignored by earlier ones).
+    pub max_nts_retry: i32,
 }
 
 impl Default for NtpSource {
@@ -162,6 +226,7 @@ impl Default for NtpSource {
             cert_set: 0,
             max_delay_quant: 0.0,
             max_unreach: 100_000,
+            max_nts_retry: 19,
         }
     }
 }
@@ -198,12 +263,19 @@ impl NtpSource {
 /// enabled, stratum 10, distance 1 s, no orphan mode.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LocalOptions {
+    /// Whether the local reference is enabled.
     pub enabled: bool,
+    /// `stratum`.
     pub stratum: i32,
+    /// `distance` (seconds).
     pub distance: f64,
+    /// `orphan`.
     pub orphan: bool,
+    /// `activate` (seconds).
     pub activate: f64,
+    /// `waitsynced` (seconds; chronyd 4.7 and later).
     pub wait_synced: f64,
+    /// `waitunsynced` (seconds; chronyd 4.7 and later).
     pub wait_unsynced: f64,
 }
 
@@ -239,15 +311,20 @@ impl LocalOptions {
 /// `chronyc manual on|off|reset`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManualOption {
+    /// `manual off`.
     Off = 0,
+    /// `manual on`.
     On = 1,
+    /// `manual reset`.
     Reset = 2,
 }
 
 /// `chronyc smoothtime reset|activate`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SmoothTimeOption {
+    /// `smoothtime reset`.
     Reset = 0,
+    /// `smoothtime activate`.
     Activate = 1,
 }
 
@@ -262,30 +339,76 @@ pub enum Request {
     Offline(SourceSelection),
     /// `burst n_good/n_total`
     Burst {
+        /// The sources.
         selection: SourceSelection,
+        /// Good samples to collect.
         n_good: u32,
+        /// At most this many samples.
         n_total: u32,
     },
     /// `minpoll`
-    ModifyMinpoll { address: Address, minpoll: i32 },
+    ModifyMinpoll {
+        /// The source's address.
+        address: Address,
+        /// Power of 2 seconds.
+        minpoll: i32,
+    },
     /// `maxpoll`
-    ModifyMaxpoll { address: Address, maxpoll: i32 },
+    ModifyMaxpoll {
+        /// The source's address.
+        address: Address,
+        /// Power of 2 seconds.
+        maxpoll: i32,
+    },
     /// `dump`
     Dump,
     /// `maxdelay`
-    ModifyMaxdelay { address: Address, max_delay: f64 },
+    ModifyMaxdelay {
+        /// The source's address.
+        address: Address,
+        /// Seconds.
+        max_delay: f64,
+    },
     /// `maxdelayratio`
-    ModifyMaxdelayratio { address: Address, ratio: f64 },
+    ModifyMaxdelayratio {
+        /// The source's address.
+        address: Address,
+        /// The new ratio.
+        ratio: f64,
+    },
     /// `maxdelaydevratio`
-    ModifyMaxdelaydevratio { address: Address, ratio: f64 },
+    ModifyMaxdelaydevratio {
+        /// The source's address.
+        address: Address,
+        /// The new ratio.
+        ratio: f64,
+    },
     /// `minstratum`
-    ModifyMinstratum { address: Address, min_stratum: i32 },
+    ModifyMinstratum {
+        /// The source's address.
+        address: Address,
+        /// The new minimum stratum.
+        min_stratum: i32,
+    },
     /// `polltarget`
-    ModifyPolltarget { address: Address, poll_target: i32 },
+    ModifyPolltarget {
+        /// The source's address.
+        address: Address,
+        /// The new target.
+        poll_target: i32,
+    },
     /// `maxupdateskew`
-    ModifyMaxupdateskew { skew_ppm: f64 },
+    ModifyMaxupdateskew {
+        /// ppm.
+        skew_ppm: f64,
+    },
     /// `makestep limit threshold`
-    ModifyMakestep { limit: i32, threshold: f64 },
+    ModifyMakestep {
+        /// Clock updates it applies to (-1: any).
+        limit: i32,
+        /// Seconds.
+        threshold: f64,
+    },
     /// `settime`: a manual time sample.
     Settime(SystemTime),
     /// `local`, `local off`
@@ -295,7 +418,10 @@ pub enum Request {
     /// `sources` (how many)
     NSources,
     /// `sources` (one)
-    SourceData { index: u32 },
+    SourceData {
+        /// 0 to [`Reply::NSources`](crate::Reply::NSources) - 1.
+        index: u32,
+    },
     /// `rekey`
     Rekey,
     /// `allow`
@@ -331,7 +457,10 @@ pub enum Request {
     /// `tracking`
     Tracking,
     /// `sourcestats` (one)
-    Sourcestats { index: u32 },
+    Sourcestats {
+        /// 0 to [`Reply::NSources`](crate::Reply::NSources) - 1.
+        index: u32,
+    },
     /// `rtcdata`
     RtcReport,
     /// `trimrtc`
@@ -341,7 +470,10 @@ pub enum Request {
     /// `manual list`
     ManualList,
     /// `manual delete`
-    ManualDelete { index: i32 },
+    ManualDelete {
+        /// The sample's index in `manual list`.
+        index: i32,
+    },
     /// `makestep`
     MakeStep,
     /// `activity`
@@ -372,26 +504,40 @@ pub enum Request {
     AuthData(Address),
     /// `clients` (one batch: at most 8 from `first_index`)
     ClientAccesses {
+        /// The index of the first client.
         first_index: u32,
+        /// How many clients (at most 8).
         n_clients: u32,
+        /// Only clients with at least this many hits.
         min_hits: u32,
+        /// Reset the counters after reading them.
         reset: bool,
     },
     /// `selectdata` (one)
-    SelectData { index: u32 },
+    SelectData {
+        /// 0 to [`Reply::NSources`](crate::Reply::NSources) - 1.
+        index: u32,
+    },
     /// `reload sources`
     ReloadSources,
     /// `selectopts`: set the options in `mask` to their value in `options`.
     ModifySelectOpts {
+        /// The source's address.
         address: Address,
+        /// Or its reference ID (reference clocks).
         ref_id: u32,
+        /// The options to change.
         mask: SelectOptions,
+        /// Their new values.
         options: SelectOptions,
     },
     /// `offset`
     ModifyOffset {
+        /// The source's address.
         address: Address,
+        /// Or its reference ID (reference clocks).
         ref_id: u32,
+        /// The new offset (seconds).
         offset: f64,
     },
 }
@@ -448,6 +594,10 @@ pub(crate) mod code {
     pub const SHUTDOWN: u16 = 62;
     pub const ONOFFLINE: u16 = 63;
     pub const ADD_SOURCE: u16 = 64;
+    pub const ADD_SOURCE2: u16 = 75;
+    /// Older forms: `DOFFSET` before 4.1, `LOCAL2` before 4.6.
+    pub const DOFFSET: u16 = 32;
+    pub const LOCAL2: u16 = 56;
     pub const NTP_SOURCE_NAME: u16 = 65;
     pub const RESET_SOURCES: u16 = 66;
     pub const AUTH_DATA: u16 = 67;
@@ -501,7 +651,7 @@ impl Request {
             CmdDenyAll(_) => code::CMDDENYALL,
             AcCheck(_) => code::ACCHECK,
             CmdAcCheck(_) => code::CMDACCHECK,
-            AddSource(_) => code::ADD_SOURCE,
+            AddSource(_) => code::ADD_SOURCE2,
             DelSource(_) => code::DEL_SOURCE,
             WriteRtc => code::WRITERTC,
             Dfreq(_) => code::DFREQ,
@@ -535,7 +685,25 @@ impl Request {
         }
     }
 
-    /// The reply chronyd answers it with.
+    /// The kinds of reply chronyd answers it with: the current one first,
+    /// then those of older chronyd versions still decoded.
+    pub fn reply_kinds(&self) -> &'static [ReplyKind] {
+        match self {
+            Request::ServerStats => &[
+                ReplyKind::ServerStats,
+                ReplyKind::ServerStats3,
+                ReplyKind::ServerStats2,
+            ],
+            Request::NtpData(_) => &[ReplyKind::NtpData, ReplyKind::NtpDataV1],
+            _ => {
+                let kind = self.reply_kind();
+                let at = ReplyKind::ALL.iter().position(|k| *k == kind).unwrap_or(0);
+                std::slice::from_ref(&ReplyKind::ALL[at])
+            }
+        }
+    }
+
+    /// The (current) reply chronyd answers it with.
     pub fn reply_kind(&self) -> ReplyKind {
         use Request::*;
         match self {
@@ -642,7 +810,7 @@ impl Request {
             AcCheck(ip) | CmdAcCheck(ip) => {
                 w.ip(Some(*ip));
             }
-            AddSource(source) => ntp_source(&mut w, source)?,
+            AddSource(source) => ntp_source2(&mut w, source)?,
             DelSource(address) | NtpData(address) | NtpSourceName(address) | AuthData(address) => {
                 w.address(address);
             }
@@ -690,21 +858,72 @@ impl Request {
         Ok(w.0)
     }
 
-    /// The request's packet, `attempt` counting the resends of the same
-    /// `sequence`: padded to at least the length of its reply, so that
-    /// chronyd never answers with more than it received.
+    /// The request's packet in its current form, `attempt` counting the
+    /// resends of the same `sequence`: padded to at least the length of its
+    /// reply, so that chronyd never answers with more than it received.
     pub fn encode(&self, sequence: u32, attempt: u16) -> Result<Vec<u8>, Error> {
-        let data = self.data()?;
+        self.packet(self.code(), &self.data()?, sequence, attempt)
+    }
+
+    /// The code of the older form of this request, for the chronyd versions
+    /// that do not know the current one: `ADD_SOURCE` (4.0 to 4.8) for
+    /// `AddSource`, `LOCAL2` (4.0 to 4.5) for `Local`, `DOFFSET` (4.0) for
+    /// `Doffset`. `None` for the others.
+    pub fn legacy_code(&self) -> Option<u16> {
+        match self {
+            Request::AddSource(_) => Some(code::ADD_SOURCE),
+            Request::Local(_) => Some(code::LOCAL2),
+            Request::Doffset(_) => Some(code::DOFFSET),
+            _ => None,
+        }
+    }
+
+    /// The request's packet in its older form ([`legacy_code`](Self::legacy_code)),
+    /// if it has one. What the older form has no room for is left out (the
+    /// local reference's activation and waits, a source's NTS-KE retries).
+    pub fn encode_legacy(&self, sequence: u32, attempt: u16) -> Option<Result<Vec<u8>, Error>> {
+        let code = self.legacy_code()?;
+        let mut w = Writer::default();
+        match self {
+            Request::AddSource(source) => {
+                if let Err(e) = ntp_source(&mut w, source) {
+                    return Some(Err(e));
+                }
+            }
+            Request::Local(local) => {
+                w.i32(local.enabled.into())
+                    .i32(local.stratum)
+                    .float(local.distance)
+                    .i32(local.orphan.into());
+            }
+            Request::Doffset(offset) => {
+                // Whole seconds rounded down, and microseconds.
+                let seconds = offset.floor();
+                let micros = ((offset - seconds) * 1e6).round();
+                w.i32(seconds as i32).i32(micros as i32);
+            }
+            _ => return None,
+        }
+        Some(self.packet(code, &w.0, sequence, attempt))
+    }
+
+    fn packet(
+        &self,
+        code: u16,
+        data: &[u8],
+        sequence: u32,
+        attempt: u16,
+    ) -> Result<Vec<u8>, Error> {
         let length = (HEADER_LEN + data.len()).max(self.reply_kind().length());
         let mut w = Writer(Vec::with_capacity(length));
         w.u8(super::PROTOCOL_VERSION)
             .u8(PKT_TYPE_REQUEST)
             .u16(0)
-            .u16(self.code())
+            .u16(code)
             .u16(attempt)
             .u32(sequence)
             .zeros(8)
-            .bytes(&data);
+            .bytes(data);
         w.0.resize(length, 0);
         Ok(w.0)
     }
@@ -721,7 +940,8 @@ fn selection_record(w: &mut Writer, selection: &SourceSelection) {
     }
 }
 
-fn ntp_source(w: &mut Writer, source: &NtpSource) -> Result<(), Error> {
+/// A source's kind and name, as both forms start.
+fn source_name(w: &mut Writer, source: &NtpSource) -> Result<(), Error> {
     let name = source.name.as_bytes();
     if name.is_empty() || name.len() >= NAME_LEN || name.contains(&0) {
         return Err(Error::InvalidRequest(
@@ -733,10 +953,47 @@ fn ntp_source(w: &mut Writer, source: &NtpSource) -> Result<(), Error> {
         SourceKind::Peer => 2,
         SourceKind::Pool => 3,
     };
-    w.u32(kind)
-        .bytes(name)
-        .zeros(NAME_LEN - name.len())
-        .u32(source.port)
+    w.u32(kind).bytes(name).zeros(NAME_LEN - name.len());
+    Ok(())
+}
+
+/// `ADD_SOURCE2` (chronyd 4.9 and later): the fields reordered, eight
+/// reserved words at the end.
+fn ntp_source2(w: &mut Writer, source: &NtpSource) -> Result<(), Error> {
+    source_name(w, source)?;
+    w.u32(source.port)
+        .i32(source.minpoll)
+        .i32(source.maxpoll)
+        .i32(source.presend_minpoll)
+        .u32(source.min_stratum)
+        .u32(source.poll_target)
+        .u32(source.version)
+        .u32(source.max_sources)
+        .i32(source.min_samples)
+        .i32(source.max_samples)
+        .i32(source.max_unreach)
+        .i32(source.filter_length)
+        .u32(source.authkey)
+        .u32(source.nts_port)
+        .u32(source.cert_set)
+        .i32(source.max_nts_retry)
+        .float(source.max_delay)
+        .float(source.max_delay_ratio)
+        .float(source.max_delay_dev_ratio)
+        .float(source.max_delay_quant)
+        .float(source.min_delay)
+        .float(source.asymmetry)
+        .float(source.offset)
+        .u32(source.flags.for_add_source2())
+        .zeros(32);
+    Ok(())
+}
+
+/// `ADD_SOURCE` (chronyd 4.0 to 4.8), as 4.8 lays it out: the fields an
+/// earlier version does not know fall in its reserved words.
+fn ntp_source(w: &mut Writer, source: &NtpSource) -> Result<(), Error> {
+    source_name(w, source)?;
+    w.u32(source.port)
         .i32(source.minpoll)
         .i32(source.maxpoll)
         .i32(source.presend_minpoll)
@@ -860,7 +1117,7 @@ mod tests {
             (Request::CmdDenyAll(s), 44),
             (Request::AcCheck(ip), 40),
             (Request::CmdAcCheck(ip), 40),
-            (Request::AddSource(Box::new(NtpSource::server("ntp"))), 372),
+            (Request::AddSource(Box::new(NtpSource::server("ntp"))), 408),
             (Request::DelSource(a()), 40),
             (Request::WriteRtc, 28),
             (Request::Dfreq(1.0), 28),
@@ -996,5 +1253,53 @@ mod tests {
         assert_eq!(Subnet::host("2001:db8::1".parse().unwrap()).bits, 128);
         let packet = Request::Allow(host).encode(1, 0).unwrap();
         assert_eq!(&packet[40..44], &[0, 0, 0, 32]);
+    }
+
+    #[test]
+    fn older_forms() {
+        let add = Request::AddSource(Box::new(NtpSource::server("ntp")));
+        let local = Request::Local(LocalOptions::default());
+        let doffset = Request::Doffset(-0.25);
+        assert_eq!(add.legacy_code(), Some(64));
+        assert_eq!(local.legacy_code(), Some(56));
+        assert_eq!(doffset.legacy_code(), Some(32));
+        assert_eq!(Request::Tracking.legacy_code(), None);
+        assert!(Request::Tracking.encode_legacy(1, 0).is_none());
+        let length = |r: &Request| r.encode_legacy(1, 0).unwrap().unwrap().len();
+        assert_eq!(length(&add), 372);
+        assert_eq!(length(&local), 36);
+        assert_eq!(length(&doffset), 28);
+        let packet = doffset.encode_legacy(1, 0).unwrap().unwrap();
+        assert_eq!(&packet[4..6], &[0, 32]);
+        // -0.25 s: -1 s and 750000 us.
+        assert_eq!(
+            &packet[20..28],
+            &[0xff, 0xff, 0xff, 0xff, 0, 0x0b, 0x71, 0xb0]
+        );
+    }
+
+    #[test]
+    fn add_source2_renumbers_flags_and_moves_fields() {
+        let source = NtpSource {
+            flags: SourceFlags::ONLINE
+                | SourceFlags::IPV6
+                | SourceFlags::EF_NET_CORRECTION
+                | SourceFlags::EF_EXP_MONO_ROOT,
+            max_nts_retry: 7,
+            max_unreach: 9,
+            ..NtpSource::server("ntp")
+        };
+        let packet = Request::AddSource(Box::new(source)).encode(1, 0).unwrap();
+        assert_eq!(&packet[4..6], &[0, 75]);
+        let word = |at: usize| u32::from_be_bytes(packet[at..at + 4].try_into().unwrap());
+        // After the type and the name: 10 words, then max_unreach.
+        assert_eq!(word(20 + 4 + 256 + 40), 9);
+        assert_eq!(word(20 + 4 + 256 + 60), 7);
+        assert_eq!(
+            word(20 + 4 + 256 + 92),
+            0x1 | 0x1000 | 0x1_0000 | 0x8000_0000
+        );
+        // Eight reserved words at the end.
+        assert!(packet[packet.len() - 32..].iter().all(|b| *b == 0));
     }
 }
