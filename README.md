@@ -100,6 +100,7 @@ The image builds chrony from its release tarball, with NTS (`ci/Dockerfile`). In
 - **`.github/workflows/ci.yml`**, on each push and pull request:
   - the tests with stable Rust and 1.75;
   - formatting, clippy, documentation (warnings are errors), packaging;
+  - cargo-deny: advisories, licenses, bans and sources of the dependencies (`deny.toml`);
   - coverage;
   - the Docker suite against each version of `ci/chrony-versions.txt`.
 - **`.github/workflows/upstream.yml`**, every Monday (and on demand): `ci/upstream.sh` looks for chrony releases newer than the newest of `ci/chrony-versions.txt` and runs the Docker suite against each.
@@ -107,6 +108,8 @@ The image builds chrony from its release tarball, with NTS (`ci/Dockerfile`). In
   - **Failing:** an issue reports it with the end of the log, once per version.
 
   `DRY_RUN=1 ci/upstream.sh` shows what it would do. It needs the repository setting *Allow GitHub Actions to create and approve pull requests*. Pull requests opened with the workflow's token do not trigger `ci.yml` themselves. To run it, close and reopen the pull request, or give the workflow a token of its own as `GH_TOKEN`.
+
+- **`.github/workflows/release.yml`**, run by hand: a release to crates.io (see [PUBLISHING.md](PUBLISHING.md)).
 
 ## Minimum Rust version
 
